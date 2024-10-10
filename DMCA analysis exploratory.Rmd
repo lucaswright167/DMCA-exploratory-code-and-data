@@ -1,0 +1,278 @@
+```{r}
+options("scipen"=9, "digits"=4)
+library(ggplot2)
+library(rlang)
+library(tidyverse)
+library(viridis)
+library(gmodels)    # contains CrossTable
+#library(DescTools)  # contains Freq
+library(MASS)       # contains fitdistr
+library(merTools)   # contains predictInterval
+library(uuid)
+options(repr.plot.width=7, repr.plot.height=3.5)
+library(lme4)
+library(lmerTest)
+library(ggpubr)
+library(texreg)
+library(sandwich)
+library(lmtest)
+library(glmmTMB)
+library(DHARMa)
+library(xtable)
+
+```
+```{r}
+## Set visual style
+catpalette   <- c("#333333", "#ea5324", "#005073", "#7D868C", "#BDBBBB", "#F2F2F2","#F6F2EB")
+chartpalette <- c("#ea5324", "#005073", "#7D868C", "#333333", "#F2F2F2","#BDBBBB", "#F6F2EB")
+
+cat.theme <-  theme_bw() +
+              theme(plot.title = element_text(size=13, face="bold", color=catpalette[3]),
+                    axis.title.x =element_text(size=10, hjust = -0.01, color = catpalette[1]),
+                    axis.title.y =element_text(size=10, color = catpalette[1]),
+                    panel.background = element_rect(fill=catpalette[6]))
+```
+
+```{r}
+data.path = "~/DMCA-exploratory-code-and-data/data/"
+filename = "longitudinal_dmca_train.csv"
+p.df <- read.csv(file.path(data.path, filename))
+```
+
+```{r}
+prepare.dataframe <- function(participant.days.df) {
+    participant.days.df$twitter_user_created_at <- as.Date(participant.days.df$twitter_user_created_at)
+    participant.days.df$notice_date <- as.Date(participant.days.df$notice_date)
+    participant.days.df[participant.days.df$user_suspended=="",]$user_suspended = "False"
+    participant.days.df$user_suspended_bin <- participant.days.df$user_suspended == "True"  
+    participant.prev.df <- subset(participant.days.df, day_num <= 0)
+    participant.post.df <- subset(participant.days.df, day_num > 0)
+    
+    ## ACCOUNT AGE AT NOTICE
+    participant.age.agg.df <- aggregate(participant.days.df[c('twitter_user_created_at', 'notice_date')], by=list(participant.days.df$twitter_user_id), FUN=min)
+    participant.age.agg.df$twitter_user_id <- participant.age.agg.df$Group.1
+    participant.age.agg.df$account.age.at.notice <- as.integer(difftime(
+        participant.age.agg.df$notice_date,
+        participant.age.agg.df$twitter_user_created_at, units="weeks"))
+    participant.days.df <- merge(participant.days.df, participant.age.agg.df[c("twitter_user_id", "account.age.at.notice")], by="twitter_user_id")    
+    
+    ## HOW MANY PREVIOUS TWEETS (USED TO REMOVE ACCOUNTS WITH MORE THAN 3200 TWEETS BEFORE SAMPLE)
+    ## > 3200 SHOULD BE IMPOSSIBLE, ACCORDING TO TWITTER API DOCUMENTATION
+    participant.prev.df <- subset(participant.days.df, day_num <= 0)
+    participant.prev.agg.df <- aggregate(participant.prev.df[c('num_tweets')], by=list(participant.prev.df$twitter_user_id), FUN=sum)
+    participant.prev.agg.df$twitter_user_id <- participant.prev.agg.df$Group.1
+
+    print(paste("Among ", nrow(participant.prev.agg.df), " participants, ",
+                nrow(subset(participant.prev.agg.df, num_tweets>3200)), 
+                " have over 3200 tweets before the lumen notice. Removing.", sep=""))
+    print(summary(subset(participant.prev.agg.df, num_tweets>3200)$num_tweets))
+    
+    print(paste("Among ", nrow(participant.prev.agg.df), " participants, ",
+                nrow(subset(participant.prev.agg.df, num_tweets==0)), 
+                " have 0 tweets before the lumen notice. Removing.", sep=""))
+
+    ## Identify accounts to trim, including high volume accounts and ones that were suspended
+    high.volume.accounts.to.trim <- subset(participant.prev.agg.df, num_tweets >= 3200)$twitter_user_id
+    low.volume.accounts.to.trim <- subset(participant.prev.agg.df, num_tweets < 0)$twitter_user_id
+    suspended.accounts.to.trim <- unique(subset(participant.days.df, user_suspended_bin==TRUE)$twitter_user_id)
+    #print(paste(length(suspended.accounts.to.trim), "accounts were suspended after the notice. Removing."))
+    
+    ## Identify Num Notices Received and Trim if > 1
+    participant.num.notices.agg.df <- aggregate(participant.days.df[c('num_lumen_notices')], by=list(participant.days.df$twitter_user_id), FUN=sum)
+
+    multiple.notice.accounts.to.trim <- unique(subset(participant.num.notices.agg.df, num_lumen_notices>1)$Group.1)
+    #print(paste(length(multiple.notice.accounts.to.trim), "accounts received more than one notice."))
+    
+    ## Trim non-en accounts
+    ## (since we're going to make a US freedom of expression argument)
+    non.en.accounts.to.trim <- unique(subset(participant.prev.df, language!="en")$twitter_user_id)
+    print(paste(length(non.en.accounts.to.trim), "accounts were UK English"))
+    
+    ## Create Trimmed Dataframe
+    p.days.trimmed.df <- subset(participant.days.df, 
+                                !(twitter_user_id %in% high.volume.accounts.to.trim) &
+                                !(twitter_user_id %in% low.volume.accounts.to.trim) &
+                                # !(twitter_user_id %in% suspended.accounts.to.trim) &
+                                # !(twitter_user_id %in% multiple.notice.accounts.to.trim) &
+                                !(twitter_user_id %in% non.en.accounts.to.trim))
+    
+    ## Year / Month Information
+    p.days.trimmed.df$twitter.user.yearmonth <- format(as.Date(p.days.trimmed.df$twitter_user_created_at), "%Y-%m")
+    p.days.trimmed.df$twitter.user.year <- format(as.Date(p.days.trimmed.df$twitter_user_created_at), "%Y")
+    
+    ## Notice Date
+    p.days.trimmed.df$notice.yearmonthday <- format(as.Date(p.days.trimmed.df$notice_date), "%Y-%m-%d")
+
+    
+    p.days.trimmed.df$time.period <- "NOTICE" #NOTICE, BEFORE, AFTER
+    p.days.trimmed.df[p.days.trimmed.df$day_num <0,]$time.period <- "BEFORE"
+    p.days.trimmed.df[p.days.trimmed.df$day_num >0,]$time.period <- "AFTER"
+    p.days.trimmed.df$after <- as.integer(p.days.trimmed.df$time.period=="AFTER")
+    p.days.trimmed.df$week.num <- p.days.trimmed.df$day_num/7
+
+    p.days.trimmed.df$day.of.week <- factor(format(as.Date(p.days.trimmed.df$date), "%A"))
+    p.days.trimmed.df$weekend <- p.days.trimmed.df$day.of.week %in% c("Sunday", "Saturday")
+    
+    p.days.trimmed.df
+}
+```
+
+```{r}
+df.dup <- p.df[!duplicated(p.df[c("twitter_user_id", "day_num")]),]
+exp.df <- prepare.dataframe(df.dup)
+```
+```{r}
+set.seed(1511008921)
+
+sample.account.ids <- sample(unique(exp.df$twitter_user_id), 5)
+sample.p.days.trimmed.df <- subset(exp.df, twitter_user_id %in% sample.account.ids)
+```
+
+
+
+
+```{r}
+exp.df$day_num <- as.numeric(exp.df$day_num)
+exp.df$day_num.factor <- factor(exp.df$day_num)
+
+
+
+exp.df$twitter_user_id <- as.factor(exp.df$twitter_user_id)
+exp.df$weekend <- as.factor(exp.df$weekend)
+```
+
+
+```{r}
+
+exp.df1 <- exp.df[exp.df$day_num <= 22,]
+exp.df1 <- exp.df1[exp.df1$day_num >= -22,]
+
+m1 <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id) + ar1(day_num.factor + 0|twitter_user_id), family = "nbinom2", data = exp.df1, ziformula = ~ user_suspended)
+
+m2 <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id), family = "nbinom2", data = exp.df1, ziformula = ~ user_suspended)
+
+summary(m1)
+```
+
+```{r}
+
+intercept <- as.numeric(fixef(m1)$cond["(Intercept)"])
+
+after <- as.numeric(fixef(m1)$cond["after"])
+slope <- as.numeric(fixef(m1)$cond["day_num"])
+afterslope <- as.numeric(fixef(m1)$cond["day_num:after"])
+
+
+percent_change_level <- ((exp(intercept + after) - exp(intercept)) / exp(intercept)) * 100
+
+percent_change_beforeslope <- ((exp(intercept + slope) - exp(intercept)) / exp(intercept)) * 100
+percent_change_afterslope <- ((exp(intercept + afterslope) - exp(intercept)) / exp(intercept)) * 100
+
+
+print(c(percent_change_level, percent_change_beforeslope, percent_change_afterslope))
+
+xtable(coef(summary(m1))$cond, digits=3)
+
+```
+
+
+```{r}
+Model1 <- residuals(m2,type="deviance")
+Model2 <- residuals(m1,type="deviance")
+
+par(mfrow=c(1,2))
+
+pacf(Model1)
+pacf(Model2)
+
+sim <- simulateResiduals(m1)
+
+testZeroInflation(sim)
+
+sim <- simulateResiduals(m2)
+
+testZeroInflation(sim)
+
+```
+```{r}
+set.seed(43500)
+
+participant <- 2981719804
+
+newdata <- subset(exp.df1, twitter_user_id == participant)[,c("day_num", "weekend", "after", "twitter_user_id", "user_suspended", "day_num.factor")]
+
+newdata$weekend <- FALSE
+
+day_zero <- newdata[newdata$day_num == 0, ]
+day_zero$after <- 1
+
+newdata <- rbind(newdata, day_zero)
+newdata <- newdata[order(newdata$day_num), ]
+
+newdata$type <- "Observed trend"
+
+counterfactual_data <- newdata[newdata$day_num > 0, c("day_num", "weekend", "after", "twitter_user_id", "user_suspended", "day_num.factor")]
+
+counterfactual_data$type <- "Counterfactual trend"
+
+counterfactual_data$after <- 0
+
+newdata <- rbind(newdata, counterfactual_data)
+
+prediction <- predict(m1, newdata = newdata, re.form = NULL, type = "response", se.fit = TRUE)
+
+predicted_values <- prediction$fit
+se.fit_values <- prediction$se.fit
+
+newdata$num_tweets <- predicted_values
+newdata$se <- se.fit_values
+
+newdata$low_ci <- newdata$num_tweets - 1.96 * newdata$se
+newdata$upper_ci  <- newdata$num_tweets + 1.96 * newdata$se
+```
+
+```{r}
+ggplot(newdata, aes(x = day_num, y = num_tweets, group = type, color = type, fill = type, linetype = type)) +
+  geom_line(size=1) +
+  geom_vline(xintercept = 0) +
+  geom_ribbon(aes(ymin=low_ci, ymax=upper_ci, color = NA)) +
+  cat.theme +
+  scale_color_manual(values=catpalette, name="") +
+  scale_fill_manual(values=alpha(catpalette, 0.4), name="") +
+  labs(x = "Day Number",
+       y = "Tweets per day") +
+  theme(strip.text.x = element_blank(),
+      strip.background = element_rect(colour="white", fill="white"),
+    legend.position=c(0.25,.75)) +
+  scale_linetype_manual(values = c("Observed trend" = "solid", "Counterfactual trend" = "dashed")) +
+  guides(color = guide_legend("Legend"),
+         linetype = guide_legend("Legend"),
+         fill = guide_legend("Legend"))
+```
+
+
+
+
+```{r}
+
+suspended.list <- unique(subset(exp.df, user_suspended_bin == TRUE)$twitter_user_id)
+
+suspended.df <- subset(exp.df, twitter_user_id %in% suspended.list)
+
+length(unique(suspended.df$twitter_user_id))
+
+plot.df <- suspended.df %>% 
+  group_by(day_num) %>%
+  summarize(count_true = sum(user_suspended == "True", na.rm = TRUE))
+
+ggplot(plot.df, aes(x = day_num, y = count_true)) +
+  cat.theme + 
+  scale_color_manual(values=c(catpalette[2], catpalette[4], catpalette[1])) +
+  geom_bar(stat = 'identity') +
+  labs(x = "Day Number",
+         y = "Cumulative Count of Suspended Accounts") +
+  ggtitle("Suspended Accounts Over Time")
+
+```
+
+
