@@ -20,6 +20,8 @@ library(glmmTMB)
 library(DHARMa)
 library(xtable)
 
+print(sessionInfo())
+
 ```
 ```{r}
 ## Set visual style
@@ -147,9 +149,13 @@ exp.df$weekend <- as.factor(exp.df$weekend)
 exp.df1 <- exp.df[exp.df$day_num <= 22,]
 exp.df1 <- exp.df1[exp.df1$day_num >= -22,]
 
+#exp.df1 <- exp.df1[exp.df1$day_num != 0,]
+
 m1 <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id) + ar1(day_num.factor + 0|twitter_user_id), family = "nbinom2", data = exp.df1, ziformula = ~ user_suspended)
 
 m2 <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id), family = "nbinom2", data = exp.df1, ziformula = ~ user_suspended)
+
+#m3 <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + factor(twitter_user_id) + ar1(day_num.factor + 0|twitter_user_id), family = "nbinom2", data = exp.df1, ziformula = ~ user_suspended)
 
 summary(m1)
 ```
@@ -219,7 +225,7 @@ counterfactual_data$after <- 0
 
 newdata <- rbind(newdata, counterfactual_data)
 
-prediction <- predict(m1, newdata = newdata, re.form = NULL, type = "response", se.fit = TRUE)
+prediction <- predict(m1, newdata = newdata, re.form = NA, type = "response", se.fit = TRUE)
 
 predicted_values <- prediction$fit
 se.fit_values <- prediction$se.fit
@@ -274,5 +280,4 @@ ggplot(plot.df, aes(x = day_num, y = count_true)) +
   ggtitle("Suspended Accounts Over Time")
 
 ```
-
 
