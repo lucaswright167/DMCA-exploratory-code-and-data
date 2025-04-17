@@ -1,0 +1,43 @@
+---
+title: "DMCA lag analysis"
+output: html_document
+date: '2025-04-14'
+---
+
+```{r setup, include=FALSE}
+library(ggplot2)
+```
+
+```{r}
+## Set visual style
+catpalette   <- c("#333333", "#ea5324", "#005073", "#7D868C", "#BDBBBB", "#F2F2F2","#F6F2EB")
+chartpalette <- c("#ea5324", "#005073", "#7D868C", "#333333", "#F2F2F2","#BDBBBB", "#F6F2EB")
+
+cat.theme <-  theme_bw() +
+              theme(plot.title = element_text(size=13, face="bold", color=catpalette[3]),
+                    axis.title.x =element_text(size=10, hjust = -0.01, color = catpalette[1]),
+                    axis.title.y =element_text(size=10, color = catpalette[1]),
+                    panel.background = element_rect(fill=catpalette[6]))
+```
+
+```{r}
+ 
+df <- read.csv("~/DMCA-exploratory-code-and-data/data/2020-dmca-notice-lag.csv")
+
+df$days_before_notice <- df$seconds_before_notice / 60 / 60 / 24
+
+median(df$days_before_notice)
+
+nrow(df[df$days_before_notice <=1, ])
+
+```
+
+```{r}
+ggplot(df, aes(x = days_before_notice)) +
+  geom_histogram(binwidth = 10, fill = catpalette[2]) +
+  labs(title = "Lag Between Tweet Published and DMCA Notice Received",
+       x = "Days",
+       y = "Count") +
+  cat.theme  
+```
+
