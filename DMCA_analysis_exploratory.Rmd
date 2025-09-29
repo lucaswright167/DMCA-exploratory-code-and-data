@@ -10,18 +10,9 @@ library(ggplot2)
 library(rlang)
 library(tidyverse)
 library(viridis)
-library(gmodels)    # contains CrossTable
-#library(DescTools)  # contains Freq
-library(MASS)       # contains fitdistr
-library(merTools)   # contains predictInterval
-library(uuid)
 options(repr.plot.width=7, repr.plot.height=3.5)
-library(lme4)
-library(lmerTest)
 library(ggpubr)
 library(texreg)
-library(sandwich)
-library(lmtest)
 library(glmmTMB)
 library(DHARMa)
 library(xtable)
@@ -82,28 +73,24 @@ prepare.dataframe <- function(participant.days.df) {
 
     ## Identify accounts to trim, including high volume accounts and ones that were suspended
     high.volume.accounts.to.trim <- subset(participant.prev.agg.df, num_tweets >= 3200)$twitter_user_id
-    low.volume.accounts.to.trim <- subset(participant.prev.agg.df, num_tweets < 0)$twitter_user_id
+    low.volume.accounts.to.trim <- subset(participant.prev.agg.df, num_tweets == 0)$twitter_user_id
     suspended.accounts.to.trim <- unique(subset(participant.days.df, user_suspended_bin==TRUE)$twitter_user_id)
-    #print(paste(length(suspended.accounts.to.trim), "accounts were suspended after the notice. Removing."))
+    new.accounts.to.trim <- unique(subset(participant.days.df, account.age.at.notice<4)$twitter_user_id)
     
     ## Identify Num Notices Received and Trim if > 1
     participant.num.notices.agg.df <- aggregate(participant.days.df[c('num_lumen_notices')], by=list(participant.days.df$twitter_user_id), FUN=sum)
 
     multiple.notice.accounts.to.trim <- unique(subset(participant.num.notices.agg.df, num_lumen_notices>1)$Group.1)
-    #print(paste(length(multiple.notice.accounts.to.trim), "accounts received more than one notice."))
     
     ## Trim non-en accounts
-    ## (since we're going to make a US freedom of expression argument)
     non.en.accounts.to.trim <- unique(subset(participant.prev.df, language!="en")$twitter_user_id)
     print(paste(length(non.en.accounts.to.trim), "accounts were UK English"))
     
     ## Create Trimmed Dataframe
     p.days.trimmed.df <- subset(participant.days.df, 
                                 !(twitter_user_id %in% high.volume.accounts.to.trim) &
-                                !(twitter_user_id %in% low.volume.accounts.to.trim) &
-                                # !(twitter_user_id %in% suspended.accounts.to.trim) &
-                                # !(twitter_user_id %in% multiple.notice.accounts.to.trim) &
-                                !(twitter_user_id %in% non.en.accounts.to.trim))
+                                !(twitter_user_id %in% non.en.accounts.to.trim) &
+                                !(twitter_user_id %in% new.accounts.to.trim))
     
     ## Year / Month Information
     p.days.trimmed.df$twitter.user.yearmonth <- format(as.Date(p.days.trimmed.df$twitter_user_created_at), "%Y-%m")
@@ -153,52 +140,117 @@ exp.df$weekend <- as.factor(exp.df$weekend)
 exp.df1 <- exp.df[exp.df$day_num <= 22,]
 exp.df1 <- exp.df1[exp.df1$day_num >= -22,]
 
-#exp.df1 <- exp.df1[exp.df1$day_num != 0,]
+m1_upper <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id) + ar1(day_num.factor + 0|twitter_user_id), family = "nbinom2", data = exp.df1)
 
-m1 <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id) + ar1(day_num.factor + 0|twitter_user_id), family = "nbinom2", data = exp.df1, ziformula = ~ user_suspended)
-
-m2 <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id), family = "nbinom2", data = exp.df1, ziformula = ~ user_suspended)
-
-summary(m1)
-```
-
-```{r}
-
-intercept <- as.numeric(fixef(m1)$cond["(Intercept)"])
-
-after <- as.numeric(fixef(m1)$cond["after"])
-slope <- as.numeric(fixef(m1)$cond["day_num"])
-afterslope <- as.numeric(fixef(m1)$cond["day_num:after"])
+m3_upper_noAR <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id), family = "nbinom2", data = exp.df1)
 
 
-percent_change_level <- ((exp(intercept + after) - exp(intercept)) / exp(intercept)) * 100
-
-percent_change_beforeslope <- ((exp(intercept + slope) - exp(intercept)) / exp(intercept)) * 100
-percent_change_afterslope <- ((exp(intercept + afterslope) - exp(intercept)) / exp(intercept)) * 100
-
-
-print(c(percent_change_level, percent_change_beforeslope, percent_change_afterslope))
-
-xtable(coef(summary(m1))$cond, digits=3)
+summary(m1_upper)
 
 ```
 
 ```{r}
-Model1 <- residuals(m2,type="deviance")
-Model2 <- residuals(m1,type="deviance")
+
+pre_model <- glmmTMB(num_tweets ~ day_num + weekend + (1|twitter_user_id) +
+                     ar1(day_num.factor + 0|twitter_user_id),
+                     family = nbinom2,
+                     data = subset(exp.df1, after == 0))
+```
+
+```{r}
+exp.df1_lower <- exp.df1
+
+suspended_post_treatment <- which(exp.df1_lower$user_suspended == "True" & 
+                                  exp.df1_lower$after == 1)
+
+if(length(suspended_post_treatment) > 0) {
+
+  suspended_data <- exp.df1_lower[suspended_post_treatment, ]
+  
+  pred_data <- suspended_data
+  pred_data$after <- 0  
+  
+  counterfactual_preds <- predict(pre_model, 
+                                  newdata = pred_data, 
+                                  type = "response",
+                                  allow.new.levels = TRUE)
+  
+  exp.df1_lower$num_tweets[suspended_post_treatment] <- counterfactual_preds
+  
+}
+
+m1_lower <- glmmTMB(num_tweets ~ day_num + after + day_num:after + weekend + (1|twitter_user_id) + ar1(day_num.factor + 0|twitter_user_id), family = "nbinom2", data = exp.df1_lower)
+
+summary(m1_lower)
+```
+
+```{r}
+### Summary stats
+
+length(unique(exp.df1$twitter_user_id))
+length(unique(exp.df1_lower$twitter_user_id))
+
+sum(exp.df1$num_tweets)
+sum(exp.df1_lower$num_tweets)
+
+
+```
+
+```{r}
+upper_effects <- fixef(m1_upper)$cond  # m1_upper = suspensions as counterfactual = upper bound on magnitude
+lower_effects <- fixef(m1_lower)$cond  # m1_lower = suspensions as 0 = lower bound on magnitude
+
+# Level effect: percent change from baseline
+lower_intercept <- lower_effects["(Intercept)"]
+lower_after <- lower_effects["after"]
+upper_intercept <- upper_effects["(Intercept)"]
+upper_after <- upper_effects["after"]
+
+lower_percent_immediate <- ((exp(lower_intercept + lower_after) - exp(lower_intercept)) / exp(lower_intercept)) * 100
+upper_percent_immediate <- ((exp(upper_intercept + upper_after) - exp(upper_intercept)) / exp(upper_intercept)) * 100
+
+# Daily growth rates
+# Pre-treatment daily growth rate
+lower_daily_growth_pre <- (exp(lower_effects["day_num"]) - 1) * 100
+upper_daily_growth_pre <- (exp(upper_effects["day_num"]) - 1) * 100
+
+# Post-treatment daily growth rate  
+lower_daily_growth_post <- (exp(lower_effects["day_num"] + lower_effects["day_num:after"]) - 1) * 100
+upper_daily_growth_post <- (exp(upper_effects["day_num"] + upper_effects["day_num:after"]) - 1) * 100
+
+# Change in daily growth rate
+lower_change_in_growth <- lower_daily_growth_post - lower_daily_growth_pre
+upper_change_in_growth <- upper_daily_growth_post - upper_daily_growth_pre
+
+comparison_percent <- data.frame(
+  Effect = c("Level_Effect", "Pre_Growth", "Post_Growth", "Change_in_Growth"),
+  Lower_Bound_Percent = c(lower_percent_immediate, lower_daily_growth_pre, 
+                          lower_daily_growth_post, lower_change_in_growth),
+  Upper_Bound_Percent = c(upper_percent_immediate, upper_daily_growth_pre, 
+                          upper_daily_growth_post, upper_change_in_growth),
+  Difference_PP = c(upper_percent_immediate - lower_percent_immediate,
+                    upper_daily_growth_pre - lower_daily_growth_pre,
+                    upper_daily_growth_post - lower_daily_growth_post,
+                    upper_change_in_growth - lower_change_in_growth)
+)
+```
+
+```{r}
+Model1 <- residuals(m3_upper_noAR,type="deviance")
+Model2 <- residuals(m1_upper,type="deviance")
 
 par(mfrow=c(1,2))
 
 pacf(Model1)
 pacf(Model2)
 
-sim <- simulateResiduals(m1)
+sim <- simulateResiduals(m1_upper)
 
 testZeroInflation(sim)
 
-sim <- simulateResiduals(m2)
+#sim2 <- simulateResiduals(m1_lower)
 
-testZeroInflation(sim)
+#testZeroInflation(sim2)
 
 ```
 
@@ -227,7 +279,7 @@ counterfactual_data$after <- 0
 
 newdata <- rbind(newdata, counterfactual_data)
 
-prediction <- predict(m1, newdata = newdata, re.form = NA, type = "response", se.fit = TRUE)
+prediction <- predict(m1_lower, newdata = newdata, re.form = NA, type = "response", se.fit = TRUE)
 
 predicted_values <- prediction$fit
 se.fit_values <- prediction$se.fit
@@ -260,7 +312,7 @@ ggplot(newdata, aes(x = day_num, y = num_tweets, group = type, color = type, fil
 
 ```{r}
 
-suspended.list <- unique(subset(exp.df, user_suspended_bin == TRUE)$twitter_user_id)
+suspended.list <- unique(subset(exp.df1, user_suspended_bin == TRUE)$twitter_user_id)
 
 suspended.df <- subset(exp.df, twitter_user_id %in% suspended.list)
 
@@ -271,11 +323,78 @@ plot.df <- suspended.df %>%
   summarize(count_true = sum(user_suspended == "True", na.rm = TRUE))
 
 ggplot(plot.df, aes(x = day_num, y = count_true)) +
-  cat.theme + 
+  cat.theme +
+  scale_fill_manual(values=alpha(catpalette, 0.4), name="") +   
   scale_color_manual(values=c(catpalette[2], catpalette[4], catpalette[1])) +
   geom_bar(stat = 'identity') +
   labs(x = "Day Number",
-         y = "Cumulative Count of Suspended Accounts") +
-  ggtitle("Suspended Accounts Over Time")
+         y = "Cumulative Count of Suspended Accounts")
 
 ```
+
+```{r}
+library(xtable)
+
+create_its_table <- function(m1_upper, m1_lower) {
+  
+  # Extract coefficients
+  upper_coef <- summary(m1_upper)$coefficients$cond
+  lower_coef <- summary(m1_lower)$coefficients$cond
+  
+  # Format coefficients
+  format_coef <- function(coef_table) {
+    coefs <- coef_table[, "Estimate"] 
+    ses <- coef_table[, "Std. Error"]
+    p_vals <- coef_table[, "Pr(>|z|)"]
+    
+    sig_stars <- ifelse(p_vals < 0.001, "***",
+                 ifelse(p_vals < 0.01, "**", 
+                 ifelse(p_vals < 0.05, "*",
+                 ifelse(p_vals < 0.1, ".", ""))))
+    
+    paste0(sprintf("%.3f", coefs), sig_stars, " (", sprintf("%.3f", ses), ")")
+  }
+  
+  # Create results table
+  results <- data.frame(
+    Variable = c("Intercept", "Day Number", "\\textbf{After}", "Weekend", "\\textbf{Day Number × After}"),
+    `Lower Bound` = format_coef(lower_coef),
+    `Upper Bound` = format_coef(upper_coef),
+    stringsAsFactors = FALSE
+  )
+  
+  n_obs <- nobs(m1_upper)
+  n_groups <- summary(m1_upper)$ngrps[1]  # Take first grouping factor
+  
+  model_info <- data.frame(
+    Variable = c("", "Observations", "Groups", "Log Likelihood"),
+    `Lower Bound` = c("", format(n_obs, big.mark = ","), format(n_groups, big.mark = ","), sprintf("%.0f", logLik(m1_upper)[1])),
+    `Upper Bound` = c("", format(n_obs, big.mark = ","), format(n_groups, big.mark = ","), sprintf("%.0f", logLik(m1_lower)[1])),
+    stringsAsFactors = FALSE
+  )
+  
+  names(model_info) <- names(results)
+  final_table <- rbind(results, model_info)
+  
+  # Print table
+  xtab <- xtable(final_table,
+                 caption = "Effect of Twitter DMCA Notices on User Tweet Volume: Bounding Analysis", 
+                 label = "tab:its_bounds")
+  
+  print(xtab,
+        include.rownames = FALSE,
+        caption.placement = "top",
+        sanitize.text.function = function(x) x,
+        add.to.row = list(
+          pos = list(nrow(final_table)),
+          command = "\\hline \n\\multicolumn{3}{p{0.8\\textwidth}}{\\footnotesize Negative binomial multi-level model estimating the effect of a DMCA notice on tweets per day (After) and trend of tweeting over time (Day Number × After). Bold variables are primary hypothesis tests. Bounds account for uncertainty in how many times unobserved suspended users would have tweeted had they not been suspended on a given day. Lower bound assumes they would have been unaffected by the notice. Upper bound assumes they would have had no additional tweets. Significance: *** p$<$0.001, ** p$<$0.01, * p$<$0.05, . p$<$0.1} \\\\ \n"
+        ))
+}
+```
+
+
+```{r}
+create_its_table(m1_upper, m1_lower)
+```
+
+
